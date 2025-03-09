@@ -1,23 +1,23 @@
-// server.js
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const cors = require('cors');
-const { Client } = require('discord.js');
+const { Client, GatewayIntentBits } = require('discord.js');
 
 const app = express();
 app.use(express.json());
-app.use(cors());
+app.use(cors({ origin: 'http://localhost:5500' })); // Adjust for your frontend port
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true
-}).then(() => console.log('Connected to MongoDB'));
+}).then(() => console.log('Connected to MongoDB'))
+  .catch(err => console.error('MongoDB connection error:', err));
 
-// User Schema
+// Schemas
 const userSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true },
@@ -25,7 +25,6 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// Bot Schema
 const botSchema = new mongoose.Schema({
     name: String,
     prefix: String,
@@ -36,44 +35,35 @@ const botSchema = new mongoose.Schema({
 });
 const Bot = mongoose.model('Bot', botSchema);
 
-// Discord Bot Manager
+// Bot Manager
 class BotManager {
     constructor() {
         this.bots = new Map();
     }
 
     async startBot(botData) {
-        const client = new Client({ intents: ['GUILDS', 'GUILD_MESSAGES'] });
+        const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
         
-        client.on('ready', () => {
-            console.log(`${botData.name} is online!`);
-        });
-
+        client.on('ready', () => console.log(`${botData.name} is online!`));
         client.on('messageCreate', message => {
             if (!message.content.startsWith(botData.prefix)) return;
-            
             const args = message.content.slice(botData.prefix.length).trim().split(/ +/);
             const command = args.shift().toLowerCase();
-            
             message.reply(`I'm a ${botData.commandType} bot! Command: ${command}`);
         });
 
-        await client.login(botData.token);
-        this.bots.set(botData._id, client);
-    }
-
-    stopBot(botId) {
-        const bot = this.bots.get(botId);
-        if (bot) {
-            bot.destroy();
-            this.bots.delete(botId);
+        try {
+            await client.login(botData.token);
+            this.bots.set(botData._id.toString(), client);
+        } catch (error) {
+            console.error('Bot login error:', error);
         }
     }
 }
 
 const botManager = new BotManager();
 
-// Middleware
+// Auth Middleware
 const authMiddleware = async (req, res, next) => {
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'No token provided' });
@@ -81,6 +71,7 @@ const authMiddleware = async (req, res, next) => {
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         req.user = await User.findById(decoded.id);
+        if (!req.user) throw new Error('User not found');
         next();
     } catch (error) {
         res.status(401).json({ error: 'Invalid token' });
@@ -107,7 +98,6 @@ app.post('/api/login', async (req, res) => {
         if (!user || !await bcrypt.compare(password, user.password)) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
-
         const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
         res.json({ token });
     } catch (error) {
@@ -118,9 +108,7 @@ app.post('/api/login', async (req, res) => {
 app.post('/api/create-bot', authMiddleware, async (req, res) => {
     try {
         const { name, prefix, commandType } = req.body;
-        
-        // Generate a bot token (in production, use Discord Developer Portal)
-        const token = `BOT_${Math.random().toString(36).substr(2)}`;
+        const token = `BOT_${Math.random().toString(36).substr(2)}`; // Simulated token
         
         const bot = new Bot({
             name,
@@ -132,19 +120,12 @@ app.post('/api/create-bot', authMiddleware, async (req, res) => {
         
         await bot.save();
         await User.findByIdAndUpdate(req.user._id, { $push: { bots: bot._id } });
-        
-        // Start the bot
         await botManager.startBot(bot);
         
         res.status(201).json({ botId: bot._id, token });
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
-});
-
-app.get('/api/bots', authMiddleware, async (req, res) => {
-    const bots = await Bot.find({ owner: req.user._id });
-    res.json(bots);
 });
 
 const PORT = process.env.PORT || 3000;
